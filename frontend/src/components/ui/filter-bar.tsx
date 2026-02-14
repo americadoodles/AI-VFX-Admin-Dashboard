@@ -53,8 +53,10 @@ export function FilterBar({
       {filters.map((filter) => (
         <SelectPrimitive.Root
           key={filter.key}
-          value={filterValues[filter.key] ?? ""}
-          onValueChange={(value) => onFilterChange(filter.key, value)}
+          value={filterValues[filter.key] || "__all__"}
+          onValueChange={(value) =>
+            onFilterChange(filter.key, value === "__all__" ? "" : value)
+          }
         >
           <SelectPrimitive.Trigger
             className={cn(
@@ -75,7 +77,7 @@ export function FilterBar({
               sideOffset={4}
             >
               <SelectPrimitive.Item
-                value=""
+                value="__all__"
                 className="relative flex cursor-default select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none data-highlighted:bg-accent data-highlighted:text-accent-foreground"
               >
                 <SelectPrimitive.ItemText>All</SelectPrimitive.ItemText>
