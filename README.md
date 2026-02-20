@@ -1,6 +1,6 @@
 # AI VFX Admin Dashboard
 
-A comprehensive staff-facing administration dashboard for the AI VFX Storyboard Platform. Built with **Next.js** (frontend) and **FastAPI** (backend).
+A comprehensive staff-facing administration dashboard for the AI VFX Storyboard Platform. Built with **Next.js** (frontend) and **FastAPI** (backend), connected to a **shared PostgreSQL database** on Google Cloud SQL.
 
 ## Architecture
 
@@ -15,16 +15,46 @@ AI-VFX-Admin-Dashboard/
 │       │   ├── ui/    # Shared UI component library
 │       │   └── users/ # User-specific components
 │       └── lib/       # API client, types, auth context
-├── backend/           # FastAPI + SQLAlchemy + SQLite
+├── backend/           # FastAPI + SQLAlchemy + PostgreSQL (Google Cloud SQL)
 │   ├── app/
-│   │   ├── models/    # SQLAlchemy database models
+│   │   ├── models/    # SQLAlchemy models (shared + admin tables)
 │   │   ├── schemas/   # Pydantic request/response schemas
 │   │   ├── routes/    # API route handlers
 │   │   ├── middleware/ # Auth, RBAC middleware
 │   │   └── services/  # Business logic (audit logging)
+│   ├── db/            # SQL schema & migration files
+│   │   ├── schema.sql                  # Base schema (users, oauth_accounts)
+│   │   ├── schema_image_generation.sql # Image generation tables
+│   │   ├── migrations/                 # Incremental migrations (001–009)
+│   │   ├── DATABASE_DESIGN.md
+│   │   └── SCHEMA_SUMMARY.md
 │   └── main.py        # Application entry point
 └── README.md
 ```
+
+## Database Architecture
+
+The admin dashboard connects to a **shared PostgreSQL database** hosted on Google Cloud SQL. The database contains two categories of tables:
+
+### Shared Tables (owned by video-gen backend)
+These tables are populated by real user activity from the video generation app:
+- `users` — User accounts (email/password + OAuth)
+- `oauth_accounts` — Linked OAuth providers
+- `sessions` — Generation workspace sessions
+- `projects` — User projects with pre-production data
+- `generation_jobs` — Image generation requests & metadata
+- `generated_images` — Output images from generations
+- `reference_images` — User-uploaded reference images
+- `project_characters`, `project_environments`, `project_references`, `project_shots` — Pre-production data
+
+### Admin Tables (owned by this dashboard)
+These tables are created and managed by the admin dashboard:
+- `staff_accounts`, `roles`, `staff_roles` — Staff authentication & RBAC
+- `admin_user_overrides` — Admin-specific user status (suspension, plan, notes)
+- `token_wallets`, `token_transactions` — Token economy management
+- `audit_logs`, `event_logs` — Admin action tracking
+- `model_configs`, `feature_flags` — System configuration
+- `api_keys` — API key management
 
 ## Features
 
@@ -35,26 +65,25 @@ AI-VFX-Admin-Dashboard/
 - Job queue health monitoring
 
 ### User Management
-- Searchable, filterable, paginated user list
-- User detail pages with tabbed views (Overview, Tokens, Activity, Security)
-- Account actions: suspend/unsuspend, MFA reset, session revocation
+- Searchable, filterable, paginated user list (from real production data)
+- User detail pages with project counts, generation stats
+- Account actions: suspend/unsuspend (via admin overlay)
 - User impersonation for support troubleshooting
-- Data export and deletion workflows
+- Data export workflows
 
 ### Token & Billing
 - Token economy dashboard with KPIs and trend charts
 - Full transaction ledger with search and filters
 - Manual token grants with step-up authentication
-- Purchase history tracking
 
 ### Activity & Logs
 - Product event explorer with full-text search
 - Immutable audit log viewer with before/after JSON diffs
-- Generation job list and detailed debug views
-- Error dashboard with frequency analysis
+- Generation job list with detailed views (settings, prompts, images)
+- Error dashboard with frequency analysis by model
 
 ### Content & Storage
-- Media asset browser with moderation flagging
+- Unified image browser (reference + generated images from GCP)
 - Storage usage analytics by user and project
 
 ### System & Operations
@@ -80,7 +109,8 @@ AI-VFX-Admin-Dashboard/
 
 ### Backend
 - **FastAPI** with async support
-- **SQLAlchemy 2.0** ORM with SQLite (dev) / PostgreSQL (prod)
+- **SQLAlchemy 2.0** ORM with **PostgreSQL** (Google Cloud SQL)
+- **psycopg2** PostgreSQL adapter
 - **Pydantic v2** for data validation
 - **python-jose** for JWT authentication
 - **passlib** with bcrypt for password hashing
@@ -91,31 +121,55 @@ AI-VFX-Admin-Dashboard/
 - **Node.js** 18+ and npm
 - **Python** 3.11+
 - **pip** (Python package manager)
+- **PostgreSQL** database (Google Cloud SQL or local)
+
+### Database Setup
+
+The shared database tables must be created first using the SQL schema files:
+
+```bash
+# 1. Run the base schema
+psql -h <CLOUD_SQL_IP> -U postgres -d ai_vfx -f backend/db/schema.sql
+
+# 2. Run the image generation schema
+psql -h <CLOUD_SQL_IP> -U postgres -d ai_vfx -f backend/db/schema_image_generation.sql
+
+# 3. Run migrations in order
+for f in backend/db/migrations/*.sql; do
+  psql -h <CLOUD_SQL_IP> -U postgres -d ai_vfx -f "$f"
+done
+```
+
+> **Note:** Admin-specific tables (staff_accounts, roles, etc.) are created automatically when the backend starts.
 
 ### Backend Setup
 
 ```bash
 cd backend
 
+# Create and activate virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
 # Install dependencies
 pip install -r requirements.txt
 
-# Start the server (auto-creates database and seeds sample data)
+# Configure environment (copy and edit)
+cp .env.example .env
+# Edit .env with your PostgreSQL connection string
+
+# Start the server
 python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 The backend will:
-- Create an SQLite database (`admin.db`) automatically
-- Seed the database with sample data on first run:
+- Create admin-only tables in the PostgreSQL database
+- Seed admin tables on first run:
   - 6 RBAC roles
   - 1 admin staff account
-  - 50 sample users
-  - 200+ token transactions
-  - 100+ generation jobs
-  - 50+ event logs
-  - 30+ media assets
   - 5 AI model configurations
   - 5 feature flags
+  - 2 API keys
 
 **Default admin credentials:**
 - Email: `admin@admin.com`
@@ -141,13 +195,36 @@ Open http://localhost:3000 in your browser. You'll be redirected to the login pa
 
 #### Backend (`backend/.env`)
 ```env
-DATABASE_URL=sqlite:///./admin.db
+# PostgreSQL connection (Google Cloud SQL)
+DATABASE_URL=postgresql://postgres:YOUR_PASSWORD@localhost:5432/ai_vfx
+
+# JWT signing secret
 SECRET_KEY=your-secret-key-change-in-production
+
+# Token expiration
 ACCESS_TOKEN_EXPIRE_MINUTES=60
+
+# Connection pool
+DB_POOL_SIZE=5
+DB_MAX_OVERFLOW=10
+DB_POOL_TIMEOUT=30
+
+# Cloud SQL Auth Proxy (optional)
+CLOUD_SQL_CONNECTION_NAME=project:region:instance
 ```
 
 #### Frontend
 The API base URL is configured in `frontend/src/lib/api.ts` (default: `http://localhost:8000`).
+
+### Google Cloud SQL Auth Proxy (Recommended for local dev)
+
+```bash
+# Start the Cloud SQL Auth Proxy
+cloud-sql-proxy PROJECT_ID:REGION:INSTANCE_NAME --port=5432
+
+# Then use localhost in DATABASE_URL
+DATABASE_URL=postgresql://postgres:YOUR_PASSWORD@localhost:5432/ai_vfx
+```
 
 ## API Endpoints
 
@@ -157,10 +234,10 @@ All admin endpoints are prefixed with `/admin` and require JWT authentication.
 |--------|-----------|
 | Auth | `POST /admin/auth/login`, `POST /admin/auth/logout`, `GET /admin/auth/me` |
 | Dashboard | `GET /admin/dashboard/kpis`, `/trends`, `/incidents`, `/queue-health` |
-| Users | `GET /admin/users`, `GET /admin/users/:id`, `POST .../suspend`, `.../unsuspend`, `.../reset-mfa`, `.../revoke-sessions`, `.../impersonate` |
+| Users | `GET /admin/users`, `GET /admin/users/:id`, `POST .../suspend`, `.../unsuspend`, `.../impersonate` |
 | Tokens | `GET /admin/tokens/dashboard`, `/ledger`, `GET/POST /admin/users/:id/tokens` |
 | Activity | `GET /admin/events`, `/audit-logs`, `/generation-jobs`, `/generation-jobs/:id`, `/errors/dashboard` |
-| Content | `GET /admin/assets`, `/storage/usage`, `POST /admin/assets/:id/flag` |
+| Content | `GET /admin/assets`, `/storage/usage` |
 | System | `GET/PUT /admin/models`, `/feature-flags`, `PUT /admin/system/incident-banner`, `/maintenance-mode` |
 | Roles | `GET/POST /admin/staff`, `PUT/DELETE /admin/staff/:id`, `GET/POST/DELETE /admin/api-keys` |
 
@@ -170,18 +247,22 @@ All admin endpoints are prefixed with `/admin` and require JWT authentication.
 |--------|--------|---------|-----|---------|-------|-------|
 | View dashboards & logs | Yes | Yes | Yes | Yes | Yes | Yes |
 | Suspend/unsuspend users | - | Yes | - | - | Yes | Yes |
-| Reset MFA / Revoke sessions | - | Yes | - | - | Yes | Yes |
 | Impersonate users | - | Yes | - | - | Yes | Yes |
 | Grant/adjust tokens | - | - | - | Yes | Yes | Yes |
 | Configure models | - | - | Yes | - | Yes | Yes |
 | Manage feature flags | - | - | Yes | - | Yes | Yes |
 | Manage staff accounts | - | - | - | - | Yes | Yes |
-| Delete user data | - | - | - | - | - | Yes |
 
 ## Development
 
-### Reset Database
-Delete `backend/admin.db` and restart the server. The seed script will recreate all sample data.
+### Local PostgreSQL (Alternative to Cloud SQL)
+```bash
+# Create a local database for development
+createdb ai_vfx
+psql -d ai_vfx -f backend/db/schema.sql
+psql -d ai_vfx -f backend/db/schema_image_generation.sql
+for f in backend/db/migrations/*.sql; do psql -d ai_vfx -f "$f"; done
+```
 
 ### Frontend Build
 ```bash

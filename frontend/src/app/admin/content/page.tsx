@@ -162,7 +162,7 @@ export default function ContentBrowserPage() {
               </div>
               <CardContent className="p-2">
                 <p className="truncate text-xs font-medium text-foreground">{asset.filename}</p>
-                <p className="text-xs text-muted-foreground">{asset.user_id.slice(0, 8)}...</p>
+                <p className="text-xs text-muted-foreground">{String(asset.user_id).slice(0, 8)}...</p>
                 <p className="text-xs text-muted-foreground">
                   {(asset.size_bytes / 1024).toFixed(1)} KB · {format(new Date(asset.created_at), "MMM d")}
                 </p>

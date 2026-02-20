@@ -119,7 +119,7 @@ def set_maintenance_mode(
 
 @router.post("/generation-jobs/{job_id}/retry")
 def retry_job(
-    job_id: str,
+    job_id: int,
     db: Session = Depends(get_db),
     _staff=Depends(require_role("admin", "owner", "ops")),
 ):
@@ -129,7 +129,7 @@ def retry_job(
     if job.status != "failed":
         raise HTTPException(status_code=400, detail="Only failed jobs can be retried")
     job.status = "pending"
-    job.error_trace = None
+    job.error_message = None
     job.completed_at = None
     db.commit()
     return {"message": "Job queued for retry", "job_id": job_id}
@@ -137,17 +137,17 @@ def retry_job(
 
 @router.post("/generation-jobs/{job_id}/cancel")
 def cancel_job(
-    job_id: str,
+    job_id: int,
     db: Session = Depends(get_db),
     _staff=Depends(require_role("admin", "owner", "ops")),
 ):
     job = db.query(GenerationJob).filter(GenerationJob.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.status not in ("pending", "running"):
+    if job.status not in ("pending", "running", "processing"):
         raise HTTPException(
             status_code=400,
-            detail="Only pending or running jobs can be cancelled",
+            detail="Only pending, running, or processing jobs can be cancelled",
         )
     job.status = "cancelled"
     job.completed_at = datetime.now(timezone.utc)

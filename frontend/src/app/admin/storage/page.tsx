@@ -15,6 +15,11 @@ function formatBytes(bytes: number) {
   return `${bytes} B`;
 }
 
+function shortId(value: string | number | null | undefined, max = 12) {
+  const label = value == null ? "—" : String(value);
+  return label.slice(0, max);
+}
+
 export default function StorageUsagePage() {
   const [view, setView] = useState<"user" | "project">("user");
   const [data, setData] = useState<StorageUsage[]>([]);
@@ -46,7 +51,7 @@ export default function StorageUsagePage() {
   const chartData = data
     .slice(0, 15)
     .map((d) => ({
-      name: view === "user" ? (d.user_id ?? "—").slice(0, 12) : (d.project_id ?? "—").slice(0, 12),
+      name: view === "user" ? shortId(d.user_id, 12) : shortId(d.project_id, 12),
       size: d.total_bytes,
       fullLabel: view === "user" ? d.user_id : d.project_id,
     }));

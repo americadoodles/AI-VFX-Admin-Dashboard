@@ -184,7 +184,7 @@ export interface QueueHealth {
 // ----- Media / Storage -----
 export interface MediaAsset {
   id: string;
-  user_id: string;
+  user_id: string | number;
   project_id: string | null;
   filename: string;
   kind: string;
@@ -197,8 +197,8 @@ export interface MediaAsset {
 }
 
 export interface StorageUsage {
-  user_id?: string | null;
-  project_id?: string | null;
+  user_id?: string | number | null;
+  project_id?: string | number | null;
   total_bytes: number;
   asset_count: number;
 }

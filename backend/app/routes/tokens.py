@@ -82,7 +82,7 @@ def token_dashboard(
 def token_ledger(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
-    user_id: Optional[str] = None,
+    user_id: Optional[int] = None,
     type_filter: Optional[str] = Query(None, alias="type"),
     db: Session = Depends(get_db),
     _staff=Depends(require_role("admin", "owner", "billing", "viewer")),
@@ -109,7 +109,7 @@ def token_ledger(
 
 def _grant_tokens(
     db: Session,
-    user_id: str,
+    user_id: int,
     amount: int,
     reason: str,
     created_by_admin_id: str,
@@ -118,7 +118,7 @@ def _grant_tokens(
     if amount <= 0:
         raise HTTPException(status_code=400, detail="Amount must be positive")
     user = db.query(User).filter(User.id == user_id).first()
-    if not user or user.status == "deleted":
+    if not user:
         raise HTTPException(status_code=404, detail="User not found")
     wallet = db.query(TokenWallet).filter(TokenWallet.user_id == user_id).first()
     if not wallet:
@@ -140,38 +140,26 @@ def _grant_tokens(
         actor_id=created_by_admin_id,
         action="tokens.grant",
         target_type="user",
-        target_id=user_id,
+        target_id=str(user_id),
         after_json={"amount": amount, "reason": reason},
         ip=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
 
 
-# Mounted under /admin/users/{user_id}/tokens in main.py or nested router
-# We expose them here as separate router that expects user_id in path.
-# So we'll add a sub-router or include these in users. Spec says:
-# "Plus under /admin/users/{user_id}/tokens: GET /, POST /grant"
-# So we need routes: GET /admin/users/{user_id}/tokens, POST /admin/users/{user_id}/tokens/grant
-# We can define them in tokens.py with prefix "" and include with prefix /admin/users/{user_id}/tokens
-# But that would require dynamic prefix. Easier: define in users.py or tokens.py with path including {user_id}.
-# I'll add them to tokens.py with a router that has prefix "" and we include it in main with prefix "/admin/users/{user_id}/tokens" - that won't work because user_id is path param.
-# So in main we include router with prefix="/admin/users" and in tokens we have a second router with prefix="" and path like /{user_id}/tokens. So in tokens.py we define:
-# router_users_tokens = APIRouter(prefix="/admin/users", tags=["user-tokens"])
-# @router_users_tokens.get("/{user_id}/tokens") and @router_users_tokens.post("/{user_id}/tokens/grant")
-# Then include router_users_tokens in main. So I'll add these to tokens.py as another router and include both.
 user_tokens_router = APIRouter(prefix="/admin/users", tags=["user-tokens"])
 
 
 @user_tokens_router.get("/{user_id}/tokens")
 def get_user_tokens(
-    user_id: str,
+    user_id: int,
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
     _staff=Depends(require_role("admin", "owner", "billing", "support")),
 ):
     user = db.query(User).filter(User.id == user_id).first()
-    if not user or user.status == "deleted":
+    if not user:
         raise HTTPException(status_code=404, detail="User not found")
     wallet = db.query(TokenWallet).filter(TokenWallet.user_id == user_id).first()
     balance = wallet.balance if wallet else 0
@@ -194,7 +182,7 @@ def get_user_tokens(
 
 @user_tokens_router.post("/{user_id}/tokens/grant")
 def grant_user_tokens(
-    user_id: str,
+    user_id: int,
     body: TokenGrantRequest,
     request: Request,
     db: Session = Depends(get_db),

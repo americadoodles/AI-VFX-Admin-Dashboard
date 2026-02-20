@@ -24,18 +24,19 @@ class TokenResponse(BaseModel):
 
 # ----- User -----
 class UserOut(BaseModel):
-    id: str
+    id: int
     email: str
-    name: str
-    status: str
-    created_at: datetime
-    last_login_at: Optional[datetime] = None
-    org_id: Optional[str] = None
-    mfa_enabled: bool
-    verified_at: Optional[datetime] = None
-    linked_providers: list = Field(default_factory=list)
-    plan: str
-    storage_used_bytes: int = 0
+    username: Optional[str] = None
+    auth_provider: str = "email"
+    avatar_url: Optional[str] = None
+    is_confirmed: bool = False
+    is_suspended: bool = False  # from admin_user_overrides
+    last_login: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    # Admin enrichment
+    plan: Optional[str] = None  # from admin_user_overrides
+    oauth_providers: list[str] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
@@ -55,7 +56,7 @@ class UserSuspendRequest(BaseModel):
 # ----- Token -----
 class TokenTransactionOut(BaseModel):
     id: str
-    user_id: str
+    user_id: int
     amount: int
     type: str
     reason: Optional[str] = None
@@ -134,26 +135,43 @@ class EventLogResponse(BaseModel):
 
 # ----- Generation Jobs -----
 class GenerationJobOut(BaseModel):
-    id: str
-    user_id: str
-    shot_id: Optional[str] = None
-    project_id: Optional[str] = None
+    id: int
+    user_id: int
+    session_id: Optional[int] = None
+    name: Optional[str] = None
     status: str
-    model: str
+    model_used: str = "DALL-E"
     prompt: Optional[str] = None
-    tokens_consumed: Optional[int] = None
-    duration_ms: Optional[int] = None
-    created_at: datetime
+    generated_prompt: Optional[str] = None
+    shot_type: Optional[str] = None
+    camera_angle: Optional[str] = None
+    style: Optional[str] = None
+    aspect_ratio: Optional[str] = None
+    is_visible: bool = True
+    duration_ms: Optional[int] = None  # computed from started_at/completed_at
+    started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
 
 
 class GenerationJobDetailOut(GenerationJobOut):
-    settings_json: Optional[dict] = None
-    output_urls: Optional[list] = None
-    error_trace: Optional[str] = None
+    location: Optional[str] = None
+    lighting: Optional[str] = None
+    weather: Optional[str] = None
+    is_custom_enabled: bool = False
+    number_of_shots: int = 1
+    error_message: Optional[str] = None
+    generation_method: Optional[str] = None
+    sort_order: int = 0
+    subject_action: Optional[str] = None
+    custom_idea: Optional[str] = None
+    suggested_prompt: Optional[str] = None
+    parent_shot_id: Optional[int] = None
+    version_number: int = 1
+    generated_image_count: int = 0
 
 
 class GenerationJobListResponse(BaseModel):
@@ -182,10 +200,10 @@ class KPIDashboardResponse(BaseModel):
 
 
 class IncidentOut(BaseModel):
-    id: str
-    job_id: str
+    id: int
+    job_id: int
     error_summary: str
-    created_at: datetime
+    created_at: Optional[datetime] = None
 
 
 class QueueHealthResponse(BaseModel):
@@ -194,31 +212,57 @@ class QueueHealthResponse(BaseModel):
     completed: int
     failed: int
     cancelled: int
+    processing: int = 0  # shared DB uses 'processing' status
 
 
-# ----- Media / Storage -----
-class MediaAssetOut(BaseModel):
-    id: str
-    user_id: str
-    project_id: Optional[str] = None
-    filename: str
-    kind: str
-    source: str
-    size_bytes: int
-    url: Optional[str] = None
-    flagged: bool = False
-    flag_reason: Optional[str] = None
-    created_at: datetime
+# ----- Content / Storage (from shared image tables) -----
+class ImageAssetOut(BaseModel):
+    """Unified view of reference_images and generated_images for admin."""
+    id: int
+    user_id: int
+    asset_type: str  # "reference" or "generated"
+    file_name: str
+    file_size: Optional[int] = None
+    mime_type: Optional[str] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    gcp_url: Optional[str] = None
+    thumbnail_url: Optional[str] = None
+    created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
 
 
 class StorageUsageOut(BaseModel):
-    user_id: Optional[str] = None
-    project_id: Optional[str] = None
+    user_id: Optional[int] = None
+    project_id: Optional[int] = None
     total_bytes: int
     asset_count: int
+
+
+# ----- Projects (from shared table) -----
+class ProjectOut(BaseModel):
+    id: int
+    user_id: int
+    title: str
+    description: Optional[str] = None
+    thumbnail_url: Optional[str] = None
+    aspect_ratio: Optional[str] = None
+    session_count: int = 0
+    shot_count: int = 0
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ProjectListResponse(BaseModel):
+    items: list[ProjectOut]
+    total: int
+    page: int
+    limit: int
 
 
 # ----- Model / Feature Flag -----

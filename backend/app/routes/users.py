@@ -7,7 +7,14 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.middleware.auth import create_access_token, get_current_staff, require_role
-from app.models.models import User, Session as UserSession, TokenWallet, GenerationJob
+from app.models.models import (
+    AdminUserOverride,
+    GenerationJob,
+    OAuthAccount,
+    Project,
+    TokenWallet,
+    User,
+)
 from app.schemas.schemas import (
     UserOut,
     UserListResponse,
@@ -18,20 +25,33 @@ from app.services.audit import create_audit_log
 router = APIRouter(prefix="/admin/users", tags=["users"])
 
 
-def _user_to_out(u: User) -> UserOut:
+def _user_to_out(db: Session, u: User) -> UserOut:
+    """Convert a shared User row + admin overlay into the API response."""
+    override = (
+        db.query(AdminUserOverride)
+        .filter(AdminUserOverride.user_id == u.id)
+        .first()
+    )
+    # Gather linked OAuth providers
+    oauth_providers = [
+        row[0]
+        for row in db.query(OAuthAccount.provider)
+        .filter(OAuthAccount.user_id == u.id)
+        .all()
+    ]
     return UserOut(
         id=u.id,
         email=u.email,
-        name=u.name,
-        status=u.status,
+        username=u.username,
+        auth_provider=u.auth_provider or "email",
+        avatar_url=u.avatar_url,
+        is_confirmed=u.is_confirmed or False,
+        is_suspended=override.is_suspended if override else False,
+        last_login=u.last_login,
         created_at=u.created_at,
-        last_login_at=u.last_login_at,
-        org_id=u.org_id,
-        mfa_enabled=u.mfa_enabled,
-        verified_at=u.verified_at,
-        linked_providers=u.linked_providers or [],
-        plan=u.plan,
-        storage_used_bytes=u.storage_used_bytes or 0,
+        updated_at=u.updated_at,
+        plan=override.plan if override else "free",
+        oauth_providers=oauth_providers,
     )
 
 
@@ -47,27 +67,44 @@ def list_users(
     db: Session = Depends(get_db),
     _staff=Depends(require_role("admin", "owner", "support", "ops")),
 ):
-    q = db.query(User).filter(User.status != "deleted")
+    q = db.query(User)
+
     if search:
         q = q.filter(
             or_(
                 User.email.ilike(f"%{search}%"),
-                User.name.ilike(f"%{search}%"),
+                User.username.ilike(f"%{search}%"),
             )
         )
-    if status_filter:
-        q = q.filter(User.status == status_filter)
+
+    # Filter by suspension status via admin overlay
+    if status_filter == "suspended":
+        q = q.join(AdminUserOverride).filter(AdminUserOverride.is_suspended == True)
+    elif status_filter == "active":
+        q = q.outerjoin(AdminUserOverride).filter(
+            or_(
+                AdminUserOverride.is_suspended == False,
+                AdminUserOverride.user_id.is_(None),
+            )
+        )
+
     if plan:
-        q = q.filter(User.plan == plan)
+        q = q.join(
+            AdminUserOverride, AdminUserOverride.user_id == User.id
+        ).filter(AdminUserOverride.plan == plan)
+
     total = q.count()
+
+    # Sorting
     order_col = getattr(User, sort, User.created_at)
     if order == "asc":
         q = q.order_by(order_col.asc())
     else:
         q = q.order_by(order_col.desc())
+
     items = q.offset((page - 1) * limit).limit(limit).all()
     return UserListResponse(
-        items=[_user_to_out(u) for u in items],
+        items=[_user_to_out(db, u) for u in items],
         total=total,
         page=page,
         limit=limit,
@@ -76,16 +113,23 @@ def list_users(
 
 @router.get("/{user_id}", response_model=dict)
 def get_user(
-    user_id: str,
+    user_id: int,
     db: Session = Depends(get_db),
     _staff=Depends(require_role("admin", "owner", "support", "ops")),
 ):
     user = db.query(User).filter(User.id == user_id).first()
-    if not user or user.status == "deleted":
+    if not user:
         raise HTTPException(status_code=404, detail="User not found")
+
     wallet = db.query(TokenWallet).filter(TokenWallet.user_id == user_id).first()
     balance = wallet.balance if wallet else 0
-    project_count = 0
+
+    project_count = (
+        db.query(func.count(Project.id))
+        .filter(Project.user_id == user_id)
+        .scalar()
+        or 0
+    )
     gen_count = (
         db.query(func.count(GenerationJob.id))
         .filter(GenerationJob.user_id == user_id)
@@ -93,7 +137,7 @@ def get_user(
         or 0
     )
     return {
-        "user": _user_to_out(user),
+        "user": _user_to_out(db, user),
         "token_balance": balance,
         "project_count": project_count,
         "generation_count": gen_count,
@@ -102,28 +146,41 @@ def get_user(
 
 @router.post("/{user_id}/suspend")
 def suspend_user(
-    user_id: str,
+    user_id: int,
     body: UserSuspendRequest,
     request: Request,
     db: Session = Depends(get_db),
     staff=Depends(require_role("admin", "owner")),
 ):
     user = db.query(User).filter(User.id == user_id).first()
-    if not user or user.status == "deleted":
+    if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    if user.status == "suspended":
+
+    override = (
+        db.query(AdminUserOverride)
+        .filter(AdminUserOverride.user_id == user_id)
+        .first()
+    )
+    if override and override.is_suspended:
         raise HTTPException(status_code=400, detail="User already suspended")
-    before = {"status": user.status}
-    user.status = "suspended"
+
+    now = datetime.now(timezone.utc)
+    if not override:
+        override = AdminUserOverride(user_id=user_id)
+        db.add(override)
+    override.is_suspended = True
+    override.suspended_at = now
+    override.suspended_reason = body.reason
     db.commit()
+
     create_audit_log(
         db,
         actor_id=staff.id,
         action="user.suspend",
         target_type="user",
-        target_id=user_id,
-        before_json=before,
-        after_json={"status": "suspended", "reason": body.reason},
+        target_id=str(user_id),
+        before_json={"is_suspended": False},
+        after_json={"is_suspended": True, "reason": body.reason},
         ip=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
@@ -132,101 +189,54 @@ def suspend_user(
 
 @router.post("/{user_id}/unsuspend")
 def unsuspend_user(
-    user_id: str,
+    user_id: int,
     body: UserSuspendRequest,
     request: Request,
     db: Session = Depends(get_db),
     staff=Depends(require_role("admin", "owner")),
 ):
     user = db.query(User).filter(User.id == user_id).first()
-    if not user or user.status == "deleted":
+    if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    if user.status != "suspended":
+
+    override = (
+        db.query(AdminUserOverride)
+        .filter(AdminUserOverride.user_id == user_id)
+        .first()
+    )
+    if not override or not override.is_suspended:
         raise HTTPException(status_code=400, detail="User is not suspended")
-    before = {"status": user.status}
-    user.status = "active"
+
+    override.is_suspended = False
+    override.suspended_at = None
+    override.suspended_reason = None
     db.commit()
+
     create_audit_log(
         db,
         actor_id=staff.id,
         action="user.unsuspend",
         target_type="user",
-        target_id=user_id,
-        before_json=before,
-        after_json={"status": "active", "reason": body.reason},
+        target_id=str(user_id),
+        before_json={"is_suspended": True},
+        after_json={"is_suspended": False, "reason": body.reason},
         ip=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
     return {"message": "User unsuspended", "user_id": user_id}
 
 
-@router.post("/{user_id}/reset-mfa")
-def reset_mfa(
-    user_id: str,
-    request: Request,
-    db: Session = Depends(get_db),
-    staff=Depends(require_role("admin", "owner")),
-):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user or user.status == "deleted":
-        raise HTTPException(status_code=404, detail="User not found")
-    before = {"mfa_enabled": user.mfa_enabled}
-    user.mfa_enabled = False
-    db.commit()
-    create_audit_log(
-        db,
-        actor_id=staff.id,
-        action="user.reset_mfa",
-        target_type="user",
-        target_id=user_id,
-        before_json=before,
-        after_json={"mfa_enabled": False},
-        ip=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
-    )
-    return {"message": "MFA reset", "user_id": user_id}
-
-
-@router.post("/{user_id}/revoke-sessions")
-def revoke_sessions(
-    user_id: str,
-    request: Request,
-    db: Session = Depends(get_db),
-    staff=Depends(require_role("admin", "owner")),
-):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user or user.status == "deleted":
-        raise HTTPException(status_code=404, detail="User not found")
-    now = datetime.now(timezone.utc)
-    db.query(UserSession).filter(
-        UserSession.user_id == user_id,
-        UserSession.revoked_at.is_(None),
-    ).update({UserSession.revoked_at: now})
-    db.commit()
-    create_audit_log(
-        db,
-        actor_id=staff.id,
-        action="user.revoke_sessions",
-        target_type="user",
-        target_id=user_id,
-        after_json={"revoked_at": now.isoformat()},
-        ip=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
-    )
-    return {"message": "All sessions revoked", "user_id": user_id}
-
-
 @router.post("/{user_id}/impersonate")
 def impersonate(
-    user_id: str,
+    user_id: int,
     db: Session = Depends(get_db),
     staff=Depends(require_role("admin", "owner")),
 ):
     user = db.query(User).filter(User.id == user_id).first()
-    if not user or user.status == "deleted":
+    if not user:
         raise HTTPException(status_code=404, detail="User not found")
     token = create_access_token(
-        data={"sub": user.id, "impersonation": True, "staff_id": staff.id},
+        data={"sub": str(user.id), "impersonation": True, "staff_id": staff.id},
         expires_delta=timedelta(minutes=60),
     )
     return {"access_token": token, "token_type": "bearer", "user_id": user_id}
@@ -234,38 +244,11 @@ def impersonate(
 
 @router.get("/{user_id}/export")
 def export_user(
-    user_id: str,
+    user_id: int,
     db: Session = Depends(get_db),
     _staff=Depends(require_role("admin", "owner")),
 ):
     user = db.query(User).filter(User.id == user_id).first()
-    if not user or user.status == "deleted":
+    if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return {"export_url": f"/admin/exports/user/{user_id}.json", "expires_in": 3600}
-
-
-@router.delete("/{user_id}")
-def delete_user(
-    user_id: str,
-    request: Request,
-    db: Session = Depends(get_db),
-    staff=Depends(require_role("admin", "owner")),
-):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user or user.status == "deleted":
-        raise HTTPException(status_code=404, detail="User not found")
-    before = {"status": user.status}
-    user.status = "deleted"
-    db.commit()
-    create_audit_log(
-        db,
-        actor_id=staff.id,
-        action="user.delete",
-        target_type="user",
-        target_id=user_id,
-        before_json=before,
-        after_json={"status": "deleted"},
-        ip=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
-    )
-    return {"message": "User deleted", "user_id": user_id}

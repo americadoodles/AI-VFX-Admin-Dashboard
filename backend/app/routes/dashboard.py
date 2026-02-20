@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func
+from sqlalchemy import func, extract
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -35,7 +35,7 @@ def get_kpis(
     total_users = db.query(func.count(User.id)).scalar() or 0
     active_users_24h = (
         db.query(func.count(User.id))
-        .filter(User.last_login_at >= day_ago)
+        .filter(User.last_login >= day_ago)
         .scalar()
         or 0
     )
@@ -58,9 +58,6 @@ def get_kpis(
         .scalar()
         or 0
     )
-    outstanding = (
-        db.query(func.coalesce(func.sum(TokenWallet.balance), 0)).scalar() or 0
-    )
     failed_24h = (
         db.query(func.count(GenerationJob.id))
         .filter(
@@ -70,9 +67,19 @@ def get_kpis(
         .scalar()
         or 0
     )
+    # Compute average latency from started_at → completed_at
     avg_latency = (
-        db.query(func.avg(GenerationJob.duration_ms))
-        .filter(GenerationJob.duration_ms.isnot(None))
+        db.query(
+            func.avg(
+                extract("epoch", GenerationJob.completed_at)
+                - extract("epoch", GenerationJob.started_at)
+            )
+            * 1000
+        )
+        .filter(
+            GenerationJob.completed_at.isnot(None),
+            GenerationJob.started_at.isnot(None),
+        )
         .scalar()
     )
 
@@ -130,7 +137,7 @@ def get_incidents(
         IncidentOut(
             id=j.id,
             job_id=j.id,
-            error_summary=(j.error_trace or "Unknown error")[:200],
+            error_summary=(j.error_message or "Unknown error")[:200],
             created_at=j.created_at,
         )
         for j in jobs
@@ -151,6 +158,7 @@ def get_queue_health(
     return QueueHealthResponse(
         pending=by_status.get("pending", 0),
         running=by_status.get("running", 0),
+        processing=by_status.get("processing", 0),
         completed=by_status.get("completed", 0),
         failed=by_status.get("failed", 0),
         cancelled=by_status.get("cancelled", 0),

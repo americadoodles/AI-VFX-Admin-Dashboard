@@ -17,8 +17,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="AI VFX Admin Dashboard API",
-    description="Backend API for the AI VFX Admin Dashboard",
-    version="1.0.0",
+    description="Backend API for the AI VFX Admin Dashboard — connected to shared PostgreSQL on Google Cloud SQL",
+    version="2.0.0",
     lifespan=lifespan,
     redirect_slashes=False,
 )
@@ -44,4 +44,4 @@ app.include_router(roles.router)
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "database": "postgresql"}

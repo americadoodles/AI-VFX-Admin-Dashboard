@@ -1,13 +1,18 @@
+"""Content & Storage routes.
+
+Replaced the admin-specific MediaAsset model with queries against the shared
+reference_images and generated_images tables from the production database.
+"""
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import func, literal, union_all
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.middleware.auth import require_role
-from app.models.models import MediaAsset
-from app.schemas.schemas import MediaAssetOut, StorageUsageOut
+from app.models.models import GeneratedImage, ReferenceImage
+from app.schemas.schemas import ImageAssetOut, StorageUsageOut
 
 router = APIRouter(prefix="/admin", tags=["content"])
 
@@ -16,37 +21,96 @@ router = APIRouter(prefix="/admin", tags=["content"])
 def list_assets(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
-    user_id: Optional[str] = None,
-    project_id: Optional[str] = None,
-    kind: Optional[str] = None,
-    source: Optional[str] = None,
-    flagged: Optional[bool] = None,
+    user_id: Optional[int] = None,
+    asset_type: Optional[str] = None,  # "reference" or "generated"
     search: Optional[str] = None,
     db: Session = Depends(get_db),
     _staff=Depends(require_role("admin", "owner", "ops", "viewer")),
 ):
-    q = db.query(MediaAsset)
-    if user_id:
-        q = q.filter(MediaAsset.user_id == user_id)
-    if project_id:
-        q = q.filter(MediaAsset.project_id == project_id)
-    if kind:
-        q = q.filter(MediaAsset.kind == kind)
-    if source:
-        q = q.filter(MediaAsset.source == source)
-    if flagged is not None:
-        q = q.filter(MediaAsset.flagged == flagged)
-    if search:
-        q = q.filter(MediaAsset.filename.ilike(f"%{search}%"))
-    total = q.count()
-    items = (
-        q.order_by(MediaAsset.created_at.desc())
-        .offset((page - 1) * limit)
-        .limit(limit)
-        .all()
-    )
+    """List all image assets (reference + generated) with unified pagination."""
+    items = []
+    total = 0
+
+    # Build separate queries then merge
+    include_ref = asset_type is None or asset_type == "reference"
+    include_gen = asset_type is None or asset_type == "generated"
+
+    if include_ref:
+        ref_q = db.query(ReferenceImage)
+        if user_id:
+            ref_q = ref_q.filter(ReferenceImage.user_id == user_id)
+        if search:
+            ref_q = ref_q.filter(ReferenceImage.file_name.ilike(f"%{search}%"))
+        ref_total = ref_q.count()
+        total += ref_total
+
+    if include_gen:
+        gen_q = db.query(GeneratedImage)
+        if user_id:
+            gen_q = gen_q.filter(GeneratedImage.user_id == user_id)
+        if search:
+            gen_q = gen_q.filter(GeneratedImage.file_name.ilike(f"%{search}%"))
+        gen_total = gen_q.count()
+        total += gen_total
+
+    # Collect results (interleaved by created_at desc)
+    offset = (page - 1) * limit
+    combined = []
+
+    if include_ref:
+        refs = (
+            ref_q.order_by(ReferenceImage.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+        for r in refs:
+            combined.append(
+                ImageAssetOut(
+                    id=r.id,
+                    user_id=r.user_id,
+                    asset_type="reference",
+                    file_name=r.file_name,
+                    file_size=r.file_size,
+                    mime_type=r.mime_type,
+                    width=r.width,
+                    height=r.height,
+                    gcp_url=r.gcp_url,
+                    thumbnail_url=r.thumbnail_url,
+                    created_at=r.created_at,
+                )
+            )
+
+    if include_gen:
+        gens = (
+            gen_q.order_by(GeneratedImage.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+        for g in gens:
+            combined.append(
+                ImageAssetOut(
+                    id=g.id,
+                    user_id=g.user_id,
+                    asset_type="generated",
+                    file_name=g.file_name,
+                    file_size=g.file_size,
+                    mime_type=g.mime_type,
+                    width=g.width,
+                    height=g.height,
+                    gcp_url=g.gcp_url,
+                    thumbnail_url=g.thumbnail_url,
+                    created_at=g.created_at,
+                )
+            )
+
+    # Sort combined and trim to limit
+    combined.sort(key=lambda x: x.created_at or "", reverse=True)
+    items = combined[:limit]
+
     return {
-        "items": [MediaAssetOut.model_validate(a) for a in items],
+        "items": [a.model_dump() for a in items],
         "total": total,
         "page": page,
         "limit": limit,
@@ -59,56 +123,75 @@ def storage_usage(
     db: Session = Depends(get_db),
     _staff=Depends(require_role("admin", "owner", "ops", "viewer")),
 ):
-    if group_by == "project":
-        rows = (
+    """Storage usage aggregated from reference_images and generated_images."""
+    if group_by == "user":
+        # Reference images per user
+        ref_usage = (
             db.query(
-                MediaAsset.project_id,
-                func.coalesce(func.sum(MediaAsset.size_bytes), 0).label("total_bytes"),
-                func.count(MediaAsset.id).label("asset_count"),
+                ReferenceImage.user_id,
+                func.coalesce(func.sum(ReferenceImage.file_size), 0).label("total_bytes"),
+                func.count(ReferenceImage.id).label("asset_count"),
             )
-            .filter(MediaAsset.project_id.isnot(None))
-            .group_by(MediaAsset.project_id)
+            .group_by(ReferenceImage.user_id)
             .all()
         )
+        gen_usage = (
+            db.query(
+                GeneratedImage.user_id,
+                func.coalesce(func.sum(GeneratedImage.file_size), 0).label("total_bytes"),
+                func.count(GeneratedImage.id).label("asset_count"),
+            )
+            .group_by(GeneratedImage.user_id)
+            .all()
+        )
+        # Merge by user_id
+        merged: dict[int, dict] = {}
+        for uid, total_bytes, count in ref_usage:
+            merged.setdefault(uid, {"total_bytes": 0, "asset_count": 0})
+            merged[uid]["total_bytes"] += int(total_bytes)
+            merged[uid]["asset_count"] += count
+        for uid, total_bytes, count in gen_usage:
+            merged.setdefault(uid, {"total_bytes": 0, "asset_count": 0})
+            merged[uid]["total_bytes"] += int(total_bytes)
+            merged[uid]["asset_count"] += count
+
         return [
             StorageUsageOut(
-                project_id=p_id,
-                total_bytes=int(total_bytes),
-                asset_count=asset_count,
+                user_id=uid,
+                total_bytes=data["total_bytes"],
+                asset_count=data["asset_count"],
             )
-            for p_id, total_bytes, asset_count in rows
+            for uid, data in merged.items()
         ]
     else:
-        rows = (
+        # Generated images have session_id which links to projects
+        # Reference images also have session_id
+        # For project grouping, we go via session → project
+        from app.models.models import GenerationSession
+
+        results: dict[int, dict] = {}
+        # Generated images → session → project
+        gen_rows = (
             db.query(
-                MediaAsset.user_id,
-                func.coalesce(func.sum(MediaAsset.size_bytes), 0).label("total_bytes"),
-                func.count(MediaAsset.id).label("asset_count"),
+                GenerationSession.project_id,
+                func.coalesce(func.sum(GeneratedImage.file_size), 0).label("total_bytes"),
+                func.count(GeneratedImage.id).label("asset_count"),
             )
-            .group_by(MediaAsset.user_id)
+            .join(GenerationSession, GeneratedImage.session_id == GenerationSession.id)
+            .filter(GenerationSession.project_id.isnot(None))
+            .group_by(GenerationSession.project_id)
             .all()
         )
+        for pid, total_bytes, count in gen_rows:
+            results.setdefault(pid, {"total_bytes": 0, "asset_count": 0})
+            results[pid]["total_bytes"] += int(total_bytes)
+            results[pid]["asset_count"] += count
+
         return [
             StorageUsageOut(
-                user_id=u_id,
-                total_bytes=int(total_bytes),
-                asset_count=asset_count,
+                project_id=pid,
+                total_bytes=data["total_bytes"],
+                asset_count=data["asset_count"],
             )
-            for u_id, total_bytes, asset_count in rows
+            for pid, data in results.items()
         ]
-
-
-@router.post("/assets/{asset_id}/flag")
-def flag_asset(
-    asset_id: str,
-    reason: Optional[str] = Query(None),
-    db: Session = Depends(get_db),
-    _staff=Depends(require_role("admin", "owner", "ops")),
-):
-    asset = db.query(MediaAsset).filter(MediaAsset.id == asset_id).first()
-    if not asset:
-        raise HTTPException(status_code=404, detail="Asset not found")
-    asset.flagged = True
-    asset.flag_reason = reason
-    db.commit()
-    return {"message": "Asset flagged", "asset_id": asset_id}

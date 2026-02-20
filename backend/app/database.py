@@ -5,14 +5,12 @@ from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 from app.config import settings
 
-# SQLite needs check_same_thread=False for FastAPI
-connect_args = {}
-if settings.DATABASE_URL.startswith("sqlite"):
-    connect_args["check_same_thread"] = False
-
 engine = create_engine(
     settings.DATABASE_URL,
-    connect_args=connect_args,
+    pool_size=settings.DB_POOL_SIZE,
+    max_overflow=settings.DB_MAX_OVERFLOW,
+    pool_timeout=settings.DB_POOL_TIMEOUT,
+    pool_pre_ping=True,  # verify connections before use
     echo=False,
 )
 

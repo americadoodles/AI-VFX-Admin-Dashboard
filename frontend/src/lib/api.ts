@@ -228,7 +228,7 @@ export async function getErrorDashboard() {
 export interface AssetsParams {
   page?: number;
   limit?: number;
-  user_id?: string;
+  user_id?: string | number;
   project_id?: string;
   kind?: string;
   source?: string;
@@ -236,20 +236,72 @@ export interface AssetsParams {
   search?: string;
 }
 
+interface RawAssetItem {
+  id: string | number;
+  user_id: string | number;
+  asset_type?: string | null;
+  file_name?: string | null;
+  file_size?: number | null;
+  gcp_url?: string | null;
+  thumbnail_url?: string | null;
+  created_at?: string | null;
+}
+
+function normalizeAssetKind(assetType?: string | null): string {
+  if (assetType === "reference") return "reference";
+  if (assetType === "generated") return "image";
+  return "image";
+}
+
+function normalizeAssetSource(assetType?: string | null): string {
+  if (assetType === "generated") return "generated";
+  return "upload";
+}
+
+function toMediaAsset(raw: RawAssetItem): import("./types").MediaAsset {
+  return {
+    id: String(raw.id ?? ""),
+    user_id: raw.user_id ?? "",
+    project_id: null,
+    filename: raw.file_name ?? "untitled",
+    kind: normalizeAssetKind(raw.asset_type),
+    source: normalizeAssetSource(raw.asset_type),
+    size_bytes: raw.file_size ?? 0,
+    url: raw.thumbnail_url ?? raw.gcp_url ?? null,
+    flagged: false,
+    flag_reason: null,
+    created_at: raw.created_at ?? new Date(0).toISOString(),
+  };
+}
+
+function mapAssetTypeFilter(params: AssetsParams): string | undefined {
+  if (params.kind === "reference") return "reference";
+  if (params.kind === "image") return "generated";
+  if (params.source === "upload") return "reference";
+  if (params.source === "generated") return "generated";
+  return undefined;
+}
+
 export async function getAssets(params: AssetsParams = {}) {
   const sp = new URLSearchParams();
   if (params.page != null) sp.set("page", String(params.page));
   if (params.limit != null) sp.set("limit", String(params.limit));
-  if (params.user_id) sp.set("user_id", params.user_id);
+  if (params.user_id != null) sp.set("user_id", String(params.user_id));
   if (params.project_id) sp.set("project_id", params.project_id);
-  if (params.kind) sp.set("kind", params.kind);
-  if (params.source) sp.set("source", params.source);
+  const assetType = mapAssetTypeFilter(params);
+  if (assetType) sp.set("asset_type", assetType);
   if (params.flagged != null) sp.set("flagged", String(params.flagged));
   if (params.search) sp.set("search", params.search);
   const q = sp.toString();
-  return request<{ items: import("./types").MediaAsset[]; total: number; page: number; limit: number }>(
+  const raw = await request<{ items: RawAssetItem[]; total: number; page: number; limit: number }>(
     `/admin/assets${q ? `?${q}` : ""}`
   );
+  return {
+    items: (raw.items ?? []).map(toMediaAsset),
+    total: raw.total,
+    page: raw.page,
+    limit: raw.limit,
+  };
 }
 
 export async function getStorageUsage(groupBy: "user" | "project" = "user") {
